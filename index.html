@@ -1,0 +1,218 @@
+<!DOCTYPE HTML>
+<html lang="en-US">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Loot table converter</title>
+    <meta name="viewport" content="width=device-width">
+    <style>
+        textarea {
+            display: inline-block;
+            width: 45%;
+        }
+        .lootTableOutput {
+          background-color: #ddd;
+        }
+        .sideBySide {
+          display: flex;
+        }
+    </style>
+</head>
+
+<body>
+    <p>Paste in a Java loot table to convert it to Bedrock.</p>
+    <div class="sideBySide">
+      <textarea class="lootTableArea"></textarea>
+      <textarea class="lootTableOutput" readonly=true></textarea>
+    </div>
+
+    <script type="text/javascript">
+        const getClass = className => document.querySelector(className)
+
+        const lootTableArea = getClass(".lootTableArea")
+        const lootTableOutput = getClass('.lootTableOutput')
+        lootTableArea.addEventListener("input", () => updateBedrock(lootTableArea.value))
+
+        function hackKeySort(json) {
+          const allKeys = []
+          JSON.stringify( json, function( key, value ){ allKeys.push( key ); return value; } )
+          const sortedAllKeys = ['type', 'name', 'weight', 'functions', ...allKeys]
+          return sortedAllKeys
+        }
+
+        //text area resize lazy hack
+
+        var tx = document.getElementsByTagName('textarea');
+        for (var i = 0; i < tx.length; i++) {
+          tx[i].setAttribute('style', 'height:' + (tx[i].scrollHeight) + 'px;overflow-y:hidden;');
+        }
+
+        function resizeTextArea(area) {
+          area.style.height = 'auto';
+          area.style.height = (area.scrollHeight) + 'px';
+        }
+
+
+        //conversion of Cory's code:
+
+        //
+        // Hello, this converts loot tables from Java to Bedrock. Ish.
+        // Current Supported Version: 1.16
+        //
+
+        // Hard replacements:
+        // - outermost level "type"
+        // - type: "minecraft:uniform"
+
+        // String replacements:
+        // "minecraft:item" -> "item"
+        // "minecraft:set_count" -> "set_count"
+        // "minecraft:set_data" -> "set_data"
+        // "enchantments" -> "enchants"
+
+        function nested_replace(json_data, search_str, replace_with, search_key = "type") {
+            for (let k of json_data) {
+                const v = json_data[k]
+                if (v instanceof Array) {
+                    for (let item of v) {
+                        nested_replace(item, search_str, replace_with, search_key)
+                    }
+                } else if (typeof v === 'object') {
+                    nested_replace(v, search_str, replace_with, search_key)
+                } else {
+                    if (v == search_str && k == search_key) {
+                        json_data[k] = replace_with
+                    }
+                }
+            }
+        }
+
+        function nested_del(json_data, search_key, search_val) {
+            for (let k in json_data) {
+                const v = json_data[k]
+                if (v instanceof Array && typeof(v[0]) === 'object') {
+                    // "type(v[0]) is dict" is to fix issues with things such as enchantments: [minecraft:soul_speed]
+                    for (let item of v) {
+                        nested_del(item, search_key, search_val)
+                    }
+                } else if (typeof v === 'object') {
+                    nested_del(v, search_key, search_val)
+                } else {
+                    if (v == search_val && k == search_key) {
+                        delete json_data[k]
+                        return json_data //why?? mgatland
+                    }
+                }
+            }
+        }
+
+        // Strip "minecraft:" from the front of these when converted
+        const strip_replacements = ["empty", "item", "set_count", "set_data", "enchant_with_levels", "enchant_random_gear", "enchant_randomly", "exploration_map"]
+
+        // Complete name replacements (or item replacements)
+        const name_changes = {
+            "minecraft:piglin_banner_pattern": {
+                "name": "minecraft:banner_pattern",
+                "data": 6
+            },
+            "minecraft:music_disc_pigstep": {
+                "name": "minecraft:record_pigstep"
+            },
+            // TEMPORARY UNTIL CROSS PLATFORM
+            "minecraft:spectral_arrow": {
+                "name": "minecraft:arrow"
+            }
+        }
+
+        // Special cases for enchanting with specific enchants
+        enchant_randomly = {
+            "minecraft:soul_speed": {
+                "id": "soul_speed",
+                "min_level": 1,
+                "max_level": 3
+            }
+        }
+
+        // Anything with the intention of being removed (and replaced with 'empty') in Bedrock, from Java
+        const replace_with_empty = []
+
+        function updateBedrock(data_str) {
+            for (let rep of strip_replacements) {
+                data_str = data_str.replace(new RegExp(`minecraft:${rep}`, 'g'), rep)
+            }
+
+            // Remove trailing 0's
+            data_str = data_str.replace(new RegExp(`\\.0,`, 'g'), ',')
+
+            const data = JSON.parse(data_str)
+
+            // Remove "type" from the top-level dict
+            delete data['type']
+
+            nested_del(data, "type", "minecraft:uniform")
+
+            for (let pool of data['pools']) {
+                for (let entry of pool['entries']) {
+                    if (!('weight' in entry) && pool['entries'].length > 1) {
+                        entry['weight'] = 1
+                    }
+
+                    if ('name' in entry) {
+                        if (entry['name'] in name_changes) {
+                            changed_entry = name_changes[entry["name"]]
+                            entry["name"] = changed_entry['name']
+
+                            // If new ID has a special data value
+                            if ('data' in changed_entry) {
+                                const func = {
+                                    'function': 'set_data',
+                                    'data': changed_entry['data']
+                                }
+                                entry["functions"].append(func)
+
+                            }
+                        } else if (entry['name'] in replace_with_empty) {
+                            if ('functions' in entry) {
+                                delete entry['functions']
+                            }
+                            entry['type'] = 'empty'
+                            delete entry['name']
+                        }
+                    }
+                    if ("functions" in entry) {
+                        for (let afunction in entry["functions"]) {
+                            if (afunction["function"] == "enchant_randomly") {
+                                // If we specify which types of enchantments to apply
+                                if ("enchantments" in afunction) {
+                                    // Change enchantment types for Bedrock to apply specific enchantments
+                                    afunction["function"] = "specific_enchants"
+
+                                    enchantments = afunction["enchantments"]
+                                    enchs = []
+                                    for (let enchantment in enchantments) {
+                                        if (enchantment in enchant_randomly) {
+                                            ench = enchant_randomly[enchantment]
+                                            enchs.push({
+                                                "id": ench['id'],
+                                                "level": [ench['min_level'], ench['max_level']]
+                                            })
+                                        }
+                                    }
+
+                                    // It's called 'enchants' in Bedrock
+                                    delete afunction["enchantments"]
+                                    afunction["enchants"] = enchs
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            lootTableOutput.value = JSON.stringify(data, hackKeySort(data), 4)
+            resizeTextArea(lootTableArea)
+            resizeTextArea(lootTableOutput)
+        }
+    </script>
+</body>
+
+</html>
